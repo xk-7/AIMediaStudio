@@ -11,6 +11,7 @@ struct RootView: View {
             Group {
                 switch state.section {
                 case .studio: StudioView()
+                case .chat: ChatView()
                 case .library: LibraryView()
                 case .history: HistoryView()
                 case .settings: SettingsView()

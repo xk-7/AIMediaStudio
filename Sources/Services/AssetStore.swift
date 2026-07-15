@@ -22,6 +22,21 @@ final class AssetStore {
     struct Index: Codable {
         var assets: [Asset]
         var jobs: [AIJob]
+        var conversations: [Conversation]
+
+        init(assets: [Asset], jobs: [AIJob], conversations: [Conversation] = []) {
+            self.assets = assets
+            self.jobs = jobs
+            self.conversations = conversations
+        }
+
+        // Tolerant decoding so older index files (without conversations) still load.
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            assets = try container.decodeIfPresent([Asset].self, forKey: .assets) ?? []
+            jobs = try container.decodeIfPresent([AIJob].self, forKey: .jobs) ?? []
+            conversations = try container.decodeIfPresent([Conversation].self, forKey: .conversations) ?? []
+        }
     }
 
     let rootURL: URL

@@ -221,6 +221,60 @@ struct OpenAIService {
         return Array(Set(ids)).sorted()
     }
 
+    // MARK: - Multi-turn conversation
+
+    struct ChatImage {
+        var data: Data
+        var mime: String
+    }
+
+    struct ChatTurn {
+        var role: String            // "user" | "assistant"
+        var text: String
+        var images: [ChatImage]
+    }
+
+    /// Sends a full conversation history and returns the assistant's reply,
+    /// preserving context across turns (optionally with attached images).
+    func chat(turns: [ChatTurn]) async throws -> String {
+        try requireKey()
+        var messages: [[String: Any]] = []
+        for turn in turns {
+            if turn.role == "assistant" {
+                messages.append(["role": "assistant", "content": turn.text])
+                continue
+            }
+            var content: [[String: Any]] = []
+            if !turn.text.isEmpty {
+                content.append(["type": "text", "text": turn.text])
+            }
+            for image in turn.images {
+                let dataURL = "data:\(image.mime);base64,\(image.data.base64EncodedString())"
+                content.append(["type": "image_url", "image_url": ["url": dataURL]])
+            }
+            if content.isEmpty { continue }
+            messages.append(["role": "user", "content": content])
+        }
+
+        let url = baseURL.appendingPathComponent("chat/completions")
+        let body: [String: Any] = [
+            "model": visionModel,
+            "messages": messages,
+            "max_tokens": 1200
+        ]
+        var request = jsonRequest(url: url)
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let data = try await send(request)
+
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = json["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any],
+              let text = message["content"] as? String else {
+            throw OpenAIError.decoding
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     // MARK: - Chat helper
 
     private func chat(content: [[String: Any]]) async throws -> String {
@@ -295,6 +349,10 @@ struct OpenAIService {
     }
 
     private func mimeType(for fileName: String) -> String {
+        Self.mimeType(forFileName: fileName)
+    }
+
+    static func mimeType(forFileName fileName: String) -> String {
         switch (fileName as NSString).pathExtension.lowercased() {
         case "png": return "image/png"
         case "jpg", "jpeg": return "image/jpeg"

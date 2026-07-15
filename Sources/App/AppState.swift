@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 /// Sidebar sections.
 enum AppSection: String, CaseIterable, Identifiable, Hashable {
     case studio
+    case chat
     case library
     case history
     case settings
@@ -14,6 +15,7 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
     var title: String {
         switch self {
         case .studio: return "创作工作台"
+        case .chat: return "AI 对话"
         case .library: return "素材库"
         case .history: return "处理记录"
         case .settings: return "设置"
@@ -23,6 +25,7 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
     var systemImage: String {
         switch self {
         case .studio: return "wand.and.rays"
+        case .chat: return "bubble.left.and.bubble.right"
         case .library: return "square.grid.2x2"
         case .history: return "clock.arrow.circlepath"
         case .settings: return "gearshape"
@@ -38,6 +41,9 @@ final class AppState: ObservableObject {
     // MARK: - Published state
     @Published var assets: [Asset] = []
     @Published var jobs: [AIJob] = []
+    @Published var conversations: [Conversation] = []
+    @Published var activeConversationID: UUID?
+    @Published var isChatting: Bool = false
     @Published var section: AppSection = .studio
 
     @Published var apiKey: String = ""
@@ -86,12 +92,13 @@ final class AppState: ObservableObject {
         let index = store.loadIndex()
         assets = index.assets.sorted { $0.createdAt > $1.createdAt }
         jobs = index.jobs.sorted { $0.createdAt > $1.createdAt }
+        conversations = index.conversations.sorted { $0.updatedAt > $1.updatedAt }
     }
 
     // MARK: - Persistence
 
     private func persist() {
-        store.saveIndex(.init(assets: assets, jobs: jobs))
+        store.saveIndex(.init(assets: assets, jobs: jobs, conversations: conversations))
     }
 
     func saveAPIKey(_ key: String) {
@@ -379,6 +386,99 @@ final class AppState: ObservableObject {
         assets.insert(asset, at: 0)
         persist()
         return asset
+    }
+
+    // MARK: - Conversations (multi-turn chat)
+
+    @discardableResult
+    func newConversation() -> Conversation {
+        let conversation = Conversation()
+        conversations.insert(conversation, at: 0)
+        activeConversationID = conversation.id
+        persist()
+        return conversation
+    }
+
+    func deleteConversation(_ conversation: Conversation) {
+        conversations.removeAll { $0.id == conversation.id }
+        if activeConversationID == conversation.id {
+            activeConversationID = conversations.first?.id
+        }
+        persist()
+    }
+
+    func renameConversation(_ id: UUID, to title: String) {
+        guard let idx = conversations.firstIndex(where: { $0.id == id }) else { return }
+        conversations[idx].title = title.isEmpty ? "新对话" : title
+        persist()
+    }
+
+    var activeConversation: Conversation? {
+        conversations.first { $0.id == activeConversationID }
+    }
+
+    /// Appends a user message (with optional image attachments) and streams back
+    /// the assistant's reply, keeping the full conversation context.
+    func sendChatMessage(conversationID: UUID, text: String, attachments: [Asset]) async {
+        guard isConfigured else {
+            errorMessage = OpenAIError.missingAPIKey.errorDescription
+            section = .settings
+            return
+        }
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
+
+        let userMessage = ChatMessage(role: .user,
+                                      text: text,
+                                      imageAssetIDs: attachments.map { $0.id })
+        conversations[idx].messages.append(userMessage)
+        conversations[idx].updatedAt = Date()
+        // Auto-title from the first user message.
+        if conversations[idx].title == "新对话",
+           !text.trimmingCharacters(in: .whitespaces).isEmpty {
+            conversations[idx].title = String(text.prefix(24))
+        }
+        moveConversationToTop(conversationID)
+        persist()
+
+        isChatting = true
+        errorMessage = nil
+        defer { isChatting = false }
+
+        // Build the full turn history for the request.
+        guard let current = conversations.first(where: { $0.id == conversationID }) else { return }
+        var turns: [OpenAIService.ChatTurn] = []
+        for message in current.messages {
+            var images: [OpenAIService.ChatImage] = []
+            for assetID in message.imageAssetIDs {
+                if let asset = asset(with: assetID),
+                   let data = try? Data(contentsOf: url(for: asset)) {
+                    images.append(.init(data: data,
+                                        mime: OpenAIService.mimeType(forFileName: asset.fileName)))
+                }
+            }
+            turns.append(.init(role: message.role.rawValue, text: message.text, images: images))
+        }
+
+        do {
+            let reply = try await service.chat(turns: turns)
+            appendAssistantMessage(reply, to: conversationID, isError: false)
+        } catch {
+            errorMessage = error.localizedDescription
+            appendAssistantMessage(error.localizedDescription, to: conversationID, isError: true)
+        }
+    }
+
+    private func appendAssistantMessage(_ text: String, to conversationID: UUID, isError: Bool) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
+        conversations[idx].messages.append(ChatMessage(role: .assistant, text: text, isError: isError))
+        conversations[idx].updatedAt = Date()
+        persist()
+    }
+
+    private func moveConversationToTop(_ id: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == id }), idx != 0 else { return }
+        let conversation = conversations.remove(at: idx)
+        conversations.insert(conversation, at: 0)
     }
 
     private func updateJob(_ job: AIJob) {
