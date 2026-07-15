@@ -1,0 +1,14 @@
+# Build output
+.build/
+DerivedData/
+build/
+
+# macOS
+.DS_Store
+
+# Xcode user-specific data (keep the generated project itself for convenience)
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
