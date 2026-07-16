@@ -22,6 +22,28 @@ enum VideoService {
         return NSImage(cgImage: cg, size: .zero)
     }
 
+    /// Extracts the final frame of a video as JPEG data, used as a reference
+    /// image to visually continue from a previous clip.
+    static func lastFrame(from url: URL, maxDimension: CGFloat = 1024) async throws -> Data {
+        let asset = AVURLAsset(url: url)
+        let duration = try await asset.load(.duration)
+        let seconds = max(0, CMTimeGetSeconds(duration) - 0.1)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.3, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = .zero
+        generator.maximumSize = CGSize(width: maxDimension, height: maxDimension)
+        let time = CMTime(seconds: seconds, preferredTimescale: 600)
+        guard let cg = try? generator.copyCGImage(at: time, actualTime: nil) else {
+            throw AssetStoreError.fileNotFound
+        }
+        let rep = NSBitmapImageRep(cgImage: cg)
+        guard let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.9]) else {
+            throw AssetStoreError.fileNotFound
+        }
+        return jpeg
+    }
+
     /// Extracts up to `count` evenly-spaced keyframes from a video and returns
     /// them as JPEG data, suitable for sending to a vision model.
     static func extractKeyframes(from url: URL,

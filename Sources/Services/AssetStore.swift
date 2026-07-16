@@ -23,19 +23,25 @@ final class AssetStore {
         var assets: [Asset]
         var jobs: [AIJob]
         var conversations: [Conversation]
+        var generationSessions: [GenerationSession]
 
-        init(assets: [Asset], jobs: [AIJob], conversations: [Conversation] = []) {
+        init(assets: [Asset],
+             jobs: [AIJob],
+             conversations: [Conversation] = [],
+             generationSessions: [GenerationSession] = []) {
             self.assets = assets
             self.jobs = jobs
             self.conversations = conversations
+            self.generationSessions = generationSessions
         }
 
-        // Tolerant decoding so older index files (without conversations) still load.
+        // Tolerant decoding so older index files (missing newer keys) still load.
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             assets = try container.decodeIfPresent([Asset].self, forKey: .assets) ?? []
             jobs = try container.decodeIfPresent([AIJob].self, forKey: .jobs) ?? []
             conversations = try container.decodeIfPresent([Conversation].self, forKey: .conversations) ?? []
+            generationSessions = try container.decodeIfPresent([GenerationSession].self, forKey: .generationSessions) ?? []
         }
     }
 

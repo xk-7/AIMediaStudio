@@ -15,27 +15,44 @@ struct StudioView: View {
     @State private var showingLibraryPicker = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 20) {
                 header
-
                 capabilityGrid
-
-                HStack(alignment: .top, spacing: 20) {
-                    inputColumn
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-                    resultColumn
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-                }
             }
-            .padding(28)
-            .frame(maxWidth: 1200)
+            .padding(.horizontal, 28)
+            .padding(.top, 24)
+            .padding(.bottom, 16)
+            .frame(maxWidth: 1200, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            switch capability {
+            case .generateImage:
+                GenerationStudioView(kind: .image)
+            case .generateVideo:
+                GenerationStudioView(kind: .video)
+            default:
+                singleShotContent
+            }
         }
         .sheet(isPresented: $showingLibraryPicker) {
             AssetPickerSheet(kind: capability.inputKind ?? .image) { picked in
                 input = picked
             }
             .environmentObject(state)
+        }
+    }
+
+    private var singleShotContent: some View {
+        ScrollView {
+            HStack(alignment: .top, spacing: 20) {
+                inputColumn
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                resultColumn
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .padding(28)
+            .frame(maxWidth: 1200)
         }
     }
 

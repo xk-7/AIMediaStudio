@@ -44,6 +44,11 @@ final class AppState: ObservableObject {
     @Published var conversations: [Conversation] = []
     @Published var activeConversationID: UUID?
     @Published var isChatting: Bool = false
+
+    @Published var generationSessions: [GenerationSession] = []
+    @Published var activeImageSessionID: UUID?
+    @Published var activeVideoSessionID: UUID?
+
     @Published var section: AppSection = .studio
 
     @Published var apiKey: String = ""
@@ -93,12 +98,18 @@ final class AppState: ObservableObject {
         assets = index.assets.sorted { $0.createdAt > $1.createdAt }
         jobs = index.jobs.sorted { $0.createdAt > $1.createdAt }
         conversations = index.conversations.sorted { $0.updatedAt > $1.updatedAt }
+        generationSessions = index.generationSessions.sorted { $0.updatedAt > $1.updatedAt }
+        activeImageSessionID = generationSessions.first { $0.kind == .image }?.id
+        activeVideoSessionID = generationSessions.first { $0.kind == .video }?.id
     }
 
     // MARK: - Persistence
 
     private func persist() {
-        store.saveIndex(.init(assets: assets, jobs: jobs, conversations: conversations))
+        store.saveIndex(.init(assets: assets,
+                              jobs: jobs,
+                              conversations: conversations,
+                              generationSessions: generationSessions))
     }
 
     func saveAPIKey(_ key: String) {
@@ -337,7 +348,17 @@ final class AppState: ObservableObject {
             let data = try Data(contentsOf: url(for: reference))
             referenceImage = (data, reference.fileName)
         }
+        return try await generateVideoData(prompt: prompt,
+                                           size: size,
+                                           duration: duration,
+                                           referenceImage: referenceImage)
+    }
 
+    /// Lower-level video generation that accepts a raw reference image.
+    private func generateVideoData(prompt: String,
+                                   size: VideoSize,
+                                   duration: VideoDuration,
+                                   referenceImage: (data: Data, fileName: String)?) async throws -> Data {
         processingStatusText = "正在创建视频任务…"
         processingProgress = 0
         var status = try await service.createVideoJob(prompt: prompt,
@@ -479,6 +500,167 @@ final class AppState: ObservableObject {
         guard let idx = conversations.firstIndex(where: { $0.id == id }), idx != 0 else { return }
         let conversation = conversations.remove(at: idx)
         conversations.insert(conversation, at: 0)
+    }
+
+    // MARK: - Generation sessions (iterative text-to-image / text-to-video)
+
+    func sessions(of kind: GenerationKind) -> [GenerationSession] {
+        generationSessions.filter { $0.kind == kind }.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    func activeSessionID(for kind: GenerationKind) -> UUID? {
+        kind == .image ? activeImageSessionID : activeVideoSessionID
+    }
+
+    func setActiveSession(_ id: UUID?, for kind: GenerationKind) {
+        if kind == .image { activeImageSessionID = id } else { activeVideoSessionID = id }
+    }
+
+    func activeGenerationSession(for kind: GenerationKind) -> GenerationSession? {
+        generationSessions.first { $0.id == activeSessionID(for: kind) }
+    }
+
+    @discardableResult
+    func newGenerationSession(_ kind: GenerationKind) -> GenerationSession {
+        let session = GenerationSession(kind: kind)
+        generationSessions.insert(session, at: 0)
+        setActiveSession(session.id, for: kind)
+        persist()
+        return session
+    }
+
+    func deleteGenerationSession(_ session: GenerationSession) {
+        generationSessions.removeAll { $0.id == session.id }
+        if activeSessionID(for: session.kind) == session.id {
+            setActiveSession(sessions(of: session.kind).first?.id, for: session.kind)
+        }
+        persist()
+    }
+
+    func lastSuccessfulAsset(in session: GenerationSession) -> Asset? {
+        for turn in session.turns.reversed() where turn.status == .succeeded {
+            if let asset = asset(with: turn.resultAssetID) { return asset }
+        }
+        return nil
+    }
+
+    /// Runs a generation turn inside a session, optionally iterating on the
+    /// previous result (image edit / video visual continuity).
+    func runGeneration(kind: GenerationKind,
+                       prompt: String,
+                       refine: Bool,
+                       imageSize: ImageSize,
+                       videoSize: VideoSize,
+                       duration: VideoDuration) async {
+        guard isConfigured else {
+            errorMessage = OpenAIError.missingAPIKey.errorDescription
+            section = .settings
+            return
+        }
+
+        // Ensure there is an active session for this kind.
+        let sessionID: UUID
+        if let existing = activeGenerationSession(for: kind) {
+            sessionID = existing.id
+        } else {
+            sessionID = newGenerationSession(kind).id
+        }
+
+        let previous = activeGenerationSession(for: kind).flatMap { lastSuccessfulAsset(in: $0) }
+        let willRefine = refine && previous != nil
+
+        var turn = GenerationTurn(prompt: prompt, status: .running, refinedFromPrevious: willRefine)
+        appendTurn(turn, toSessionID: sessionID, prompt: prompt)
+
+        isProcessing = true
+        errorMessage = nil
+        processingProgress = nil
+        processingStatusText = nil
+        defer {
+            isProcessing = false
+            processingProgress = nil
+            processingStatusText = nil
+        }
+
+        let capability = kind.capability
+        var job = AIJob(capability: capability, status: .running, prompt: prompt,
+                        inputAssetIDs: previous.map { [$0.id] } ?? [])
+        jobs.insert(job, at: 0)
+
+        do {
+            let resultAsset: Asset
+            switch kind {
+            case .image:
+                let data: Data
+                if willRefine, let previous {
+                    let imageData = try Data(contentsOf: url(for: previous))
+                    data = try await service.editImage(imageData: imageData,
+                                                       fileName: previous.fileName,
+                                                       prompt: prompt,
+                                                       size: imageSize)
+                } else {
+                    data = try await service.generateImage(prompt: prompt, size: imageSize)
+                }
+                resultAsset = try saveGeneratedMedia(data, ext: "png", kind: .image,
+                                                     prompt: prompt, capability: capability,
+                                                     source: previous)
+
+            case .video:
+                var reference: (data: Data, fileName: String)?
+                if willRefine, let previous, previous.kind == .video {
+                    processingStatusText = "正在提取上一段视频的画面…"
+                    let frame = try await VideoService.lastFrame(from: url(for: previous))
+                    reference = (frame, "last_frame.jpg")
+                }
+                let data = try await generateVideoData(prompt: prompt,
+                                                       size: videoSize,
+                                                       duration: duration,
+                                                       referenceImage: reference)
+                resultAsset = try saveGeneratedMedia(data, ext: "mp4", kind: .video,
+                                                     prompt: prompt, capability: capability,
+                                                     source: previous)
+            }
+
+            turn.status = .succeeded
+            turn.resultAssetID = resultAsset.id
+            job.status = .succeeded
+            job.resultAssetID = resultAsset.id
+        } catch {
+            turn.status = .failed
+            turn.errorMessage = error.localizedDescription
+            job.status = .failed
+            job.errorMessage = error.localizedDescription
+            errorMessage = error.localizedDescription
+        }
+
+        updateTurn(turn, inSessionID: sessionID)
+        updateJob(job)
+    }
+
+    private func appendTurn(_ turn: GenerationTurn, toSessionID id: UUID, prompt: String) {
+        guard let idx = generationSessions.firstIndex(where: { $0.id == id }) else { return }
+        generationSessions[idx].turns.append(turn)
+        generationSessions[idx].updatedAt = Date()
+        if generationSessions[idx].title == "新创作",
+           !prompt.trimmingCharacters(in: .whitespaces).isEmpty {
+            generationSessions[idx].title = String(prompt.prefix(24))
+        }
+        moveSessionToTop(id)
+        persist()
+    }
+
+    private func updateTurn(_ turn: GenerationTurn, inSessionID id: UUID) {
+        guard let sIdx = generationSessions.firstIndex(where: { $0.id == id }),
+              let tIdx = generationSessions[sIdx].turns.firstIndex(where: { $0.id == turn.id }) else { return }
+        generationSessions[sIdx].turns[tIdx] = turn
+        generationSessions[sIdx].updatedAt = Date()
+        persist()
+    }
+
+    private func moveSessionToTop(_ id: UUID) {
+        guard let idx = generationSessions.firstIndex(where: { $0.id == id }), idx != 0 else { return }
+        let session = generationSessions.remove(at: idx)
+        generationSessions.insert(session, at: 0)
     }
 
     private func updateJob(_ job: AIJob) {

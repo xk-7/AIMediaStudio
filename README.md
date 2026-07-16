@@ -19,11 +19,15 @@
 
 ### 五种 AI 能力
 
-- **文生图**:输入提示词 → OpenAI `images/generations`(默认 `gpt-image-1`)。
-- **文生视频**:提示词(可选参考图)→ OpenAI Sora `POST /videos` 异步任务 → 轮询 `GET /videos/{id}` → 下载 `GET /videos/{id}/content`(默认 `sora-2`,可选 `sora-2-pro`,时长 4/8/12 秒)。
+- **文生图**:输入提示词 → OpenAI `images/generations`(默认 `gpt-image-1`)。**支持多轮迭代**:开启「在上一张基础上修改」后,后续提示词会用 `images/edits` 在上一张结果上继续改(如「把背景换成蓝色」)。
+- **文生视频**:提示词(可选参考图)→ OpenAI Sora `POST /videos` 异步任务 → 轮询 `GET /videos/{id}` → 下载 `GET /videos/{id}/content`(默认 `sora-2`,可选 `sora-2-pro`,时长 4/8/12 秒)。**支持多轮迭代**:开启「延续上一段画面」后,会自动取上一段视频的末帧作为参考图,保持画面连续。
 - **图片编辑**:上传图片 + 提示词 → OpenAI `images/edits`。
 - **图片理解**:上传图片 + 问题 → OpenAI `chat/completions` 视觉模型(默认 `gpt-4o`)。
 - **视频理解**:上传视频 → 本地用 AVFoundation 抽取关键帧 → 交给视觉模型分析。
+
+### 创作会话(文生图 / 文生视频的多轮迭代)
+
+工作台里的「文生图」「文生视频」采用**会话式创作**:每个会话是一串「提示词 → 结果」的迭代记录,可持续追加指令在上一结果上继续打磨。会话可新建/切换/删除,并**保存在本地、重启后自动恢复**。
 
 ### AI 对话(多轮会话)
 
